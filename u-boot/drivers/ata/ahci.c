@@ -8,6 +8,14 @@
  *
  * This driver provides a SCSI interface to SATA.
  */
+
+/*
+	common code for ahci, provide SCSI to sata
+	for example: ahci_bind_scsi will be used in dwc_ahci.c
+	
+ */
+
+
 #include <blk.h>
 #include <cpu_func.h>
 #include <log.h>
