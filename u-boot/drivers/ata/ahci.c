@@ -147,10 +147,11 @@ static void sunxi_dma_init(void __iomem *port_mmio)
 int ahci_reset(void __iomem *base)
 {
 	int i = 1000;
-	u32 __iomem *host_ctl_reg = base + HOST_CTL;
-	u32 tmp = readl(host_ctl_reg); /* global controller reset */
+	u32 __iomem *host_ctl_reg = base + HOST_CTL;//Global HBA Control(0x4)
+	u32 tmp = readl(host_ctl_reg); //get GHC(global hba control) reg value
 
 	if ((tmp & HOST_RESET) == 0)
+		/* GHC.hr set 1, run global controller reset */
 		writel_with_flush(tmp | HOST_RESET, host_ctl_reg);
 
 	/*
@@ -159,9 +160,9 @@ int ahci_reset(void __iomem *base)
 	 */
 	do {
 		udelay(1000);
-		tmp = readl(host_ctl_reg);
+		tmp = readl(host_ctl_reg);//GHC.hr will be 0 when controller reset finish
 		i--;
-	} while ((i > 0) && (tmp & HOST_RESET));
+	} while ((i > 0) && (tmp & HOST_RESET)); 
 
 	if (i == 0) {
 		printf("controller reset failed (0x%x)\n", tmp);
@@ -182,29 +183,44 @@ static int ahci_host_init(struct ahci_uc_priv *uc_priv)
 	debug("ahci_host_init: start\n");
 
 	cap_save = readl(mmio + HOST_CAP);
+/*
+R/Wo: read, can only write once
+
+synopsys CAP reg, bit27,bit28 is R/Wo, the other bit is R
+
+	bit28(smps field, R/Wo): supports mechanical presence switch for hot plug operation
+	bit27(sss): supports staggered Spin-up
+	bit17(spm): supports port multiplier 
+ */
 	cap_save &= ((1 << 28) | (1 << 17));
 	cap_save |= (1 << 27);  /* Staggered Spin-up. Not needed. */
 
-	ret = ahci_reset(uc_priv->mmio_base);
+	ret = ahci_reset(uc_priv->mmio_base);//controller golbal reset
 	if (ret)
 		return ret;
 
-	writel_with_flush(HOST_AHCI_EN, mmio + HOST_CTL);
-	writel(cap_save, mmio + HOST_CAP);
-	writel_with_flush(0xf, mmio + HOST_PORTS_IMPL);
+	/*synopsys GHC.ae is R, reset val is 1*/
+	writel_with_flush(HOST_AHCI_EN, mmio + HOST_CTL);//Enable AHCI,set GHC.ae
 
-	uc_priv->cap = readl(mmio + HOST_CAP);
-	uc_priv->port_map = readl(mmio + HOST_PORTS_IMPL);
+	writel(cap_save, mmio + HOST_CAP);
+
+	/*Port Implemented Register, which bit set, according port implemented*/
+	writel_with_flush(0xf, mmio + HOST_PORTS_IMPL);//port0,1,2,3 available
+
+	uc_priv->cap = readl(mmio + HOST_CAP); //record CAP reg
+	uc_priv->port_map = readl(mmio + HOST_PORTS_IMPL);//record port can be availabel
 	port_map = uc_priv->port_map;
+
+	/*record supported ports number, supported does not mean available*/
 	uc_priv->n_ports = (uc_priv->cap & 0x1f) + 1;
 
 	debug("cap 0x%x  port_map 0x%x  n_ports %d\n",
 	      uc_priv->cap, uc_priv->port_map, uc_priv->n_ports);
 
-	for (i = 0; i < uc_priv->n_ports; i++) {
-		if (!(port_map & (1 << i)))
-			continue;
-		uc_priv->port[i].port_mmio = ahci_port_base(mmio, i);
+	for (i = 0; i < uc_priv->n_ports; i++) { // polling all port that supported 
+		if (!(port_map & (1 << i)))//is port available ?
+			continue;//port is not available, next
+		uc_priv->port[i].port_mmio = ahci_port_base(mmio, i);//record port base addr
 		port_mmio = (u8 *)uc_priv->port[i].port_mmio;
 
 		/* make sure port is not active */
@@ -214,7 +230,7 @@ static int ahci_host_init(struct ahci_uc_priv *uc_priv)
 			debug("Port %d is active. Deactivating.\n", i);
 			tmp &= ~(PORT_CMD_LIST_ON | PORT_CMD_FIS_ON |
 				 PORT_CMD_FIS_RX | PORT_CMD_START);
-			writel_with_flush(tmp, port_mmio + PORT_CMD);
+			writel_with_flush(tmp, port_mmio + PORT_CMD);//let port be inactive
 
 			/* spec says 500 msecs for each bit, so
 			 * this is slightly incorrect.
@@ -230,10 +246,13 @@ static int ahci_host_init(struct ahci_uc_priv *uc_priv)
 		 * already be on in the command register.
 		 */
 		cmd = readl(port_mmio + PORT_CMD);
-		cmd |= PORT_CMD_SPIN_UP;
-		writel_with_flush(cmd, port_mmio + PORT_CMD);
+		cmd |= PORT_CMD_SPIN_UP;//set PnCMD.sud, spin-up device
+		writel_with_flush(cmd, port_mmio + PORT_CMD);//spin-up device, start COMRESET Flow
 
-		/* Bring up SATA link. */
+		/* Bring up SATA link. */ 
+
+
+		/*check PnSSTS.det ,val must be 3 (link established),  or link fail*/
 		ret = ahci_link_up(uc_priv, i);
 		if (ret) {
 			printf("SATA link %d timeout.\n", i);
@@ -245,20 +264,27 @@ static int ahci_host_init(struct ahci_uc_priv *uc_priv)
 		/* Clear error status */
 		tmp = readl(port_mmio + PORT_SCR_ERR);
 		if (tmp)
-			writel(tmp, port_mmio + PORT_SCR_ERR);
+			writel(tmp, port_mmio + PORT_SCR_ERR);// clear PnSERR reg 
 
 		debug("Spinning up device on SATA port %d... ", i);
 
 		j = 0;
 		while (j < WAIT_MS_SPINUP) {
-			tmp = readl(port_mmio + PORT_TFDATA);
-			if (!(tmp & (ATA_BUSY | ATA_DRQ)))
-				break;
+
+/*  PnTFD, Port Task File Data Register
+	this reg contains Task File Error and Status registers updated every time a new 
+Register FIS, PIO Setup FIS, or Set Device Bits FIS is received from the device 
+
+	PnTFD.sts copy the Task File Status Reg, PnTFD.err copy the Task File Error Register
+*/
+			tmp = readl(port_mmio + PORT_TFDATA); 
+			if (!(tmp & (ATA_BUSY | ATA_DRQ))) //check bit7(interface is busy),bit3(data transfer request)
+				break; // if interface not busy, no data transfer request, break while
 			udelay(1000);
 			tmp = readl(port_mmio + PORT_SCR_STAT);
 			tmp &= PORT_SCR_STAT_DET_MASK;
 			if (tmp == PORT_SCR_STAT_DET_PHYRDY)
-				break;
+				break; // if PnSSTS.det is 3 ,break while
 			j++;
 		}
 
@@ -266,7 +292,7 @@ static int ahci_host_init(struct ahci_uc_priv *uc_priv)
 		if (tmp == PORT_SCR_STAT_DET_COMINIT) {
 			debug("SATA link %d down (COMINIT received), retrying...\n", i);
 			i--;
-			continue;
+			continue; //if PnSSTS.det is 1 , retry this port
 		}
 
 		printf("Target spinup took %d ms.\n", j);
@@ -277,26 +303,26 @@ static int ahci_host_init(struct ahci_uc_priv *uc_priv)
 
 		tmp = readl(port_mmio + PORT_SCR_ERR);
 		debug("PORT_SCR_ERR 0x%x\n", tmp);
-		writel(tmp, port_mmio + PORT_SCR_ERR);
+		writel(tmp, port_mmio + PORT_SCR_ERR);//clear PnSERR reg
 
 		/* ack any pending irq events for this port */
-		tmp = readl(port_mmio + PORT_IRQ_STAT);
+		tmp = readl(port_mmio + PORT_IRQ_STAT);//read PnIS reg,check interrupt
 		debug("PORT_IRQ_STAT 0x%x\n", tmp);
 		if (tmp)
-			writel(tmp, port_mmio + PORT_IRQ_STAT);
+			writel(tmp, port_mmio + PORT_IRQ_STAT);//clear all interrupt
 
-		writel(1 << i, mmio + HOST_IRQ_STAT);
+		writel(1 << i, mmio + HOST_IRQ_STAT);//clear according interrupt status in global reg  IS(0x8)
 
 		/* register linkup ports */
 		tmp = readl(port_mmio + PORT_SCR_STAT);
 		debug("SATA port %d status: 0x%x\n", i, tmp);
 		if ((tmp & PORT_SCR_STAT_DET_MASK) == PORT_SCR_STAT_DET_PHYRDY)
-			uc_priv->link_port_map |= (0x01 << i);
+			uc_priv->link_port_map |= (0x01 << i); //record which port link OK
 	}
 
 	tmp = readl(mmio + HOST_CTL);
 	debug("HOST_CTL 0x%x\n", tmp);
-	writel(tmp | HOST_IRQ_EN, mmio + HOST_CTL);
+	writel(tmp | HOST_IRQ_EN, mmio + HOST_CTL); // link over, enable Interrupt to CPU
 	tmp = readl(mmio + HOST_CTL);
 	debug("HOST_CTL 0x%x\n", tmp);
 	return 0;
@@ -374,7 +400,7 @@ static int ahci_init_one(struct ahci_uc_priv *uc_priv, struct udevice *dev)
 	uc_priv->udma_mask = 0x7f;	/*Fixme,assume to support UDMA6 */
 
 	struct scsi_plat *plat = dev_get_uclass_plat(dev);
-	uc_priv->mmio_base = (void *)plat->base;
+	uc_priv->mmio_base = (void *)plat->base; //ahci controller base addr
 
 	debug("ahci mmio_base=0x%p\n", uc_priv->mmio_base);
 	/* initialize adapter */
@@ -963,11 +989,15 @@ int ahci_probe_scsi(struct udevice *ahci_dev, ulong base)
 	struct udevice *dev;
 	int ret;
 
+	
+/*ahci_dev first child is scsi udevice, dev->driver->name will be "ahci_scsi"
+  "ahci_scsi" driver define in this file.
+*/
 	device_find_first_child(ahci_dev, &dev);
 	if (!dev)
 		return -ENODEV;
 	uc_plat = dev_get_uclass_plat(dev);
-	uc_plat->base = base;
+	uc_plat->base = base; //ahci controller base addr
 	uc_plat->max_lun = 1;
 	uc_plat->max_id = 2;
 
